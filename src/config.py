@@ -48,11 +48,25 @@ class _Base(BaseModel):
 
 class DataConfig(_Base):
     start_date: date
+    # The corpus we SCRAPE is a superset of the corpus we ANALYSE. Raw data is
+    # cheap and immutable; re-crawling someone else's server later is not.
+    scrape_start_date: date
     end_date: date | None = None  # None => "today", resolved at download time
     ticker: str
     auto_adjust: bool
     entry_price_field: Literal["Open", "Close"]
     exit_price_field: Literal["Open", "Close"]
+
+    @field_validator("scrape_start_date")
+    @classmethod
+    def _scrape_is_superset(cls, v: date, info) -> date:
+        start = info.data.get("start_date")
+        if start is not None and v > start:
+            raise ValueError(
+                f"scrape_start_date ({v}) is after start_date ({start}); the analysed "
+                "sample would reference documents that were never fetched."
+            )
+        return v
 
 
 class ScrapeConfig(_Base):
@@ -66,10 +80,37 @@ class ScrapeConfig(_Base):
     timeout_seconds: int = Field(gt=0)
     max_retries: int = Field(ge=0)
     document_types: list[Literal["statement", "minutes"]]
+    min_text_chars: int = Field(gt=0)
+    # Declared BEFORE scheduled_release_time_et on purpose: pydantic validates
+    # fields in declaration order, and a validator's `info.data` contains only
+    # the fields already validated. The conservatism check below needs this one.
+    session_open_time_et: time
     scheduled_release_time_et: time
     # Keys are ISO dates as written in YAML; PyYAML parses bare 2008-10-08 into
     # a date object, so the annotation is dict[date, time] rather than str keys.
     release_time_overrides: dict[date, time] = Field(default_factory=dict)
+
+    @field_validator("scheduled_release_time_et")
+    @classmethod
+    def _default_is_conservative(cls, v: time, info) -> time:
+        """The default release time must be AFTER the session open.
+
+        This is the safety principle in type form. The default applies to every
+        document whose true release time we have not verified. If it were before
+        the open, an unverified document would be entered at that same day's
+        open -- trading on text that may not have existed yet. That is
+        look-ahead bias introduced by a default value, which is exactly the kind
+        of leak that hides in innocent-looking config.
+        """
+        open_t = info.data.get("session_open_time_et")
+        if open_t is not None and v <= open_t:
+            raise ValueError(
+                f"scheduled_release_time_et ({v}) must be strictly after "
+                f"session_open_time_et ({open_t}). The default governs every "
+                "UNVERIFIED release time, so it must err late (conservative), "
+                "never early (a look-ahead leak)."
+            )
+        return v
 
 
 class SentimentConfig(_Base):
@@ -80,6 +121,10 @@ class SentimentConfig(_Base):
     device: Literal["auto", "cuda", "cpu"]
     seed: int
     strip_boilerplate: bool
+
+
+class SampleConfig(_Base):
+    include_unscheduled: bool
 
 
 class SignalConfig(_Base):
@@ -120,6 +165,8 @@ class RobustnessConfig(_Base):
     threshold_theta: list[float]
     aggregation: list[Literal["prob", "count"]]
     entry: list[Literal["next_trading_open", "same_day_close"]]
+    sample_start: list[date]
+    include_unscheduled: list[bool]
 
 
 class PathsConfig(_Base):
@@ -141,6 +188,7 @@ class Config(_Base):
     data: DataConfig
     scrape: ScrapeConfig
     sentiment: SentimentConfig
+    sample: SampleConfig
     signal: SignalConfig
     backtest: BacktestConfig
     costs: CostsConfig

@@ -142,7 +142,7 @@ These are the terms you must be able to define instantly and use correctly. Memo
 ⚠️ **The label-ordering trap (verified, Phase 0).** The `ProsusAI/finbert` checkpoint declares:
 
 ```python
-model.config.id2label == {0: 'positive', 1: 'negative', 2: 'neutral'}
+model.config.id2label == {0: "positive", 1: "negative", 2: "neutral"}
 ```
 
 This is **neither alphabetical** (which would be negative/neutral/positive) **nor** the ordering most sentiment checkpoints use. Writing `logits[:, 0]` and calling it "negative" — the natural guess, and what most tutorial code does — **silently inverts the entire signal.** The pipeline would run perfectly, produce plausible-looking numbers, and give you an IC with the wrong sign. Nothing would crash.
@@ -205,7 +205,41 @@ Before any code, understand the *actual* data-generating process. Getting this w
 
 - The FOMC holds **8 scheduled meetings per year** (occasionally an unscheduled/emergency meeting).
 - Meetings are typically **two days**; the decision is announced on **day 2**.
-- Archives on federalreserve.gov go back to the **1990s** (statements) with older material available too. Realistically you'll get a clean, consistent series from roughly **1994–2000 onward** (the Fed only began issuing regular post-meeting statements in 1994).
+- Archives on federalreserve.gov go back to the **1990s**.
+
+### 3.1.1 🔧 The disclosure regime changed — measured in Phase 1
+
+The original text above said a clean series starts "roughly 1994–2000 onward." That is too vague, and the vagueness hides the single most consequential data fact in the project. **Measured statement counts per year:**
+
+```
+1994:  6    2000:  8    2007: 10    2014:  8    2021:  8
+1995:  3    2001: 11    2008: 11    2015:  8    2022:  8
+1996:  0 ⚠  2002:  8    2009:  8    2016:  8    2023:  8
+1997:  1    2003:  8    2010:  9    2017:  8    2024:  8
+1998:  3    2004:  8    2011:  8    2018:  8    2025:  8
+1999:  6    2005:  8    2012:  8    2019:  9    2026:  5 (YTD)
+            2006:  8    2013:  8    2020: 10
+```
+
+**Definition — disclosure regime:** the central bank's own policy about *when* it tells the public anything. It is not a market variable; it is an institutional choice, and it changed underneath our data.
+
+- **1994–1998:** the FOMC issued a statement **only when it changed policy.** No policy change meant complete silence. 1996 had no rate moves, hence zero documents.
+- **From May 1999:** a statement after *every* meeting. The count stabilises at 8/year from 2000.
+
+🧠 **Why this forces the sample to start in 2000 — two independent reasons.**
+
+**(1) Selection effect.** Before 1999 the *existence* of a statement is itself the signal, and a far louder one than its tone: a statement existing means "policy just moved." Those years therefore have a different data-generating process, and pooling them risks a spurious positive IC driven by the existence effect that we would then misattribute to FinBERT reading tone.
+
+| Era | What carries the information |
+|---|---|
+| 1994–1998 | **Existence** (statement ⟺ policy changed). Tone is secondary. |
+| 1999/2000– | **Tone only.** A statement always exists; the surprise is in the words. |
+
+**(2) The Z-score silently breaks.** §4.2's trailing window assumes roughly regular event spacing — "*L* = 6 meetings" is meant to proxy "the last ~9 months of policy." With 1996 empty, a 6-meeting lookback at the 1997-03 statement reaches back to **1994-11**: a 28-month window masquerading as a 9-month one, describing an entirely different policy era. Nothing errors; the signal's core premise just quietly stops holding.
+
+**The cost of excluding them is negligible**, which is what makes the decision easy: 19 events (8% of the corpus), moving the minimum detectable IC from 0.127 to 0.132. A rounding error, traded for a homogeneous data-generating process.
+
+💬 *"I found the Fed only announced policy CHANGES until 1999 — 1996 has zero statements. That's a selection effect, and it also breaks my trailing Z-score, because a 6-meeting lookback in 1997 reaches back to 1994. I cut the sample to 2000+ and it cost me 8% of the data."*
 
 ### 3.2 The three document types (and their VERY different timestamps)
 
@@ -262,7 +296,45 @@ No loop, no `+ 1`, no branch for weekends, no off-by-one to argue about in an in
 - **2020-03-15** was a **Sunday**. Date arithmetic gives Monday 2020-03-16, which happens to be a trading day — *by luck*. The same code applied to a Friday-evening release gives Saturday, and then you need special-casing, and then you have written a worse trading calendar by accident.
 - **2008-10-08 07:00 ET** was released **before that day's open**. Date arithmetic cannot even represent the question, because it has thrown away the time. A correctly-typed timestamp makes the pre-open case *visible*; a date makes it *invisible*.
 
-🧠 **The general principle:** `release_datetime` is a **timezone-aware `America/New_York` timestamp**, never a date. Naive datetimes (no timezone attached) are a bug farm in market data — the moment anything touches UTC, a 2:00 PM ET release silently becomes 7:00 PM UTC, crosses midnight in some conversions, and shifts a day. Attach the timezone once, at the point of creation, and never strip it.
+🧠 **The general principle:** `release_datetime` is a **timezone-aware `America/New_York` timestamp**, never a date. Naive datetimes (no timezone attached) are a bug farm in market data — the moment anything touches UTC, a 2:00 PM ET release silently becomes 7:00 PM UTC, crosses midnight in some conversions, and shifts a day. Attach the timezone once, at the point of creation, and never strip it. `next_trading_open()` **raises** on naive input rather than guessing.
+
+### 3.3.1 🔧 Refinement forced by Phase 1: compare against the session OPEN, not the date
+
+The rule above says "the first trading **day** strictly after the release." That silently assumes every release lands during or after a session. **Several do not:**
+
+| Date | Release | Consequence of a day-granularity rule |
+|---|---|---|
+| 2008-10-08 | **07:00 ET** | coordinated emergency cut, **pre-open** — entered a full session late |
+| 2020-03-23 | **08:00 ET** | pre-open — entered a session late |
+| 2020-03-15 | 17:00 ET, **Sunday** | no "next calendar day" that is a session except by luck |
+
+Entering a session late is not a rounding error here: these are the highest-impact events in the sample, so the error concentrates exactly where it costs most.
+
+**The fix needs no special-casing at all** — just compare against the right instant. The NYSE opens at **09:30 ET**, so:
+
+- a **14:00** release has *missed* that day's 09:30 open → entry is the **next** open ✅ (unchanged for every ordinary statement)
+- an **08:00** release has *not* → entry is **that day's** open ✅
+
+Same rule, correctly applied. Implemented by localising each session date to its 09:30 opening instant and `searchsorted`-ing the release timestamp into that array.
+
+🔧 **And the release times are now *parsed from the documents themselves*, not assumed.** FOMC statements state their own release time in the text:
+
+> `For release at 2:00 p.m. EDT` · `For release at 5:00 p.m. EDT` (2020-03-15)
+
+`extract_release_time()` reads it. **88 of the 225 sampled statements now carry an evidence-based timestamp** rather than a convention-based one. Both hand-entered overrides were independently **confirmed** by the documents' own text:
+
+```
+2008-10-08  override 07:00  document says 07:00  -> AGREE
+2020-03-15  override 17:00  document says 17:00  -> AGREE
+```
+
+⚠️ **The safety principle, and why precedence is ordered the way it is.** Where the document is silent (older statements say only "For immediate release"), the **14:00 default** applies — and the config schema *enforces* that this default is after the session open. That is deliberate:
+
+> **Erring late costs signal. Erring early fabricates alpha.**
+
+An unverified document must never win same-session entry. Precedence is `manual_override` → `parsed_from_document` → `scheduled_default`, so a regex change can never silently overturn a researched value, and any disagreement between the two is reported rather than buried.
+
+**Measured result on the real panel:** smallest release→entry lag **1.50 hours** (an 08:00 release to the 09:30 open — exactly right), median **19.5 hours**, all 225 rows strictly positive.
 
 ### 3.4 Price data (SPY)
 
@@ -293,31 +365,37 @@ An empty discrepancy frame is the pass condition. This is a general pattern wort
 
 ### 3.5 Sample-size reality check (say this out loud in interviews)
 
-🔧 **Updated arithmetic (the original said "~240"; with the sample running to 2026 the figure is higher, and the *usable* figure is lower than either).**
+🔧 **MEASURED in Phase 1 — the estimate has been replaced by the count.**
+
+The original text said "≈ 240". A later revision estimated "≈ 263". The scraper has now been run, and the real funnel is:
 
 | Step | Count | Why |
 |---|---|---|
-| 8 scheduled meetings × 33 years (1994–2026) | ≈ 264 | the raw calendar |
-| plus unscheduled / intermeeting statements | ≈ +8 | 2001-09-17, 2008-10-08, 2020-03-03, 2020-03-15, … |
-| **statements expected in `data/raw`** | **≈ 270** | to be confirmed empirically in Phase 1 |
-| minus first *L* = 6 (undefined Z-score window, §4.2) | −6 | the trailing window is not yet full |
-| minus the tail whose horizon exceeds the price data | −1 | the most recent meeting at *h* = 20 |
-| **usable observations, `n`** | **≈ 263** | the number that goes into every t-statistic |
+| documents discovered across all index pages | 393 | statements + minutes, 1994 → 2026 |
+| of which **statements** | **244** | the rest are 149 minutes (Phase 5) |
+| after dropping flagged parses | 241 | −3, all 1994–1995, all outside the sample anyway |
+| **after the 2000-01-01 disclosure-regime cut** | **225** | −16, the sparse-disclosure era (§3.1) |
+| after the unscheduled filter (`include_unscheduled: true`) | 225 | −0, unscheduled events are kept and tagged |
+| **usable observations for the IC, `n`** | **219** | minus the first *L* = 6 (undefined Z-score window, §4.2) |
 
-⚠️ **Report `n`, never assume it.** The exact figure depends on how many documents the scraper actually recovers — some early-1990s pages are missing or malformed, and a statement that fails to parse must be *dropped and counted*, never silently scored as neutral. Phase 1's Definition of Done requires printing the realised count.
+Composition: **212 scheduled, 13 unscheduled**, spanning **2000-02-02 → 2026-07-29**.
+
+🔧 **The disclosure-regime discovery (§3.1) is the reason 244 statements yield only 225.** From 1994 to 1998 the FOMC issued a statement *only when it changed policy* — 1996 has **zero**, 1997 has **one**. Those years are a different data-generating process and are excluded from the primary sample; they remain scraped and available as a labelled robustness check.
+
+⚠️ **Report `n`, never assume it.** A statement that fails to parse must be *dropped and counted*, never silently scored as neutral. `scripts/build_panel.py` prints the funnel above on every run, and asserts `n_scraped == n_parsed + n_flagged`.
 
 That is still a **tiny dataset** by ML standards. Consequences we must respect:
 - We cannot "train" a model on this; we can only **evaluate a pre-trained model's signal.** (Good — that's the plan.)
 - Every statistic has wide error bars. **Confidence intervals and t-stats are mandatory, not optional.**
 - Overfitting risk is enormous: with ~263 points, if you try 20 different signal variants and pick the best, you *will* find a "significant" result by chance. Section 5 addresses this head-on.
 
-🧠 **Put the number in perspective.** At *n* = 263, the standard error of a correlation near zero is approximately $1/\sqrt{n} \approx 0.062$. So the **smallest IC that could ever reach statistical significance at the 5% level is about $1.96 \times 0.062 \approx 0.12$** — and §2.4 tells us that an IC of 0.05 is already *institution-grade*. In other words:
+🧠 **Put the number in perspective.** At the measured *n* = 219, the standard error of a correlation near zero is approximately $1/\sqrt{n} \approx 0.068$. So the **smallest IC that could ever reach statistical significance at the 5% level is about $1.96 \times 0.068 \approx 0.13$** — and §2.4 tells us that an IC of 0.05 is already *institution-grade*. In other words:
 
 > **This sample is too small to detect a genuinely good signal.** A real, tradable, professional-quality edge of IC ≈ 0.05 would be statistically indistinguishable from zero here.
 
-This is not a flaw in the project — it is *the single most important finding the project can produce*, and it must be stated up front rather than discovered at the end. It reframes the whole exercise: we are not asking "is there an edge?", we are asking **"what can and cannot be learned from 263 observations?"** — which is a far more sophisticated question, and the one a research desk actually lives with. See §14.5 for the full power calculation.
+This is not a flaw in the project — it is *the single most important finding the project can produce*, and it must be stated up front rather than discovered at the end. It reframes the whole exercise: we are not asking "is there an edge?", we are asking **"what can and cannot be learned from 219 observations?"** — which is a far more sophisticated question, and the one a research desk actually lives with. See §14.5 for the full power calculation.
 
-💬 *"The binding constraint on this project isn't compute or data engineering — it's statistical power. With ~263 events the minimum detectable IC is about 0.12, but a genuinely strong signal is 0.05. So I designed the evaluation around confidence intervals and a power analysis rather than a single hero backtest, and I can tell you exactly what sample size would be needed to answer the question properly."*
+💬 *"The binding constraint on this project isn't compute or data engineering — it's statistical power. With 219 events the minimum detectable IC is about 0.13, but a genuinely strong signal is 0.05. So I designed the evaluation around confidence intervals and a power analysis rather than a single hero backtest, and I can tell you exactly what sample size would be needed to answer the question properly."*
 
 ---
 
@@ -389,7 +467,36 @@ We compute a small **panel** of forward returns for *h* ∈ {1, 3, 5, 10, 20} to
 
 **Definition — panel:** a table with one row per *observation* (here, per FOMC event) and one column per *variable* (here, each horizon's forward return, plus the signal and metadata). Holding all horizons side by side in one table — rather than recomputing per horizon — is what makes the IC grid in §5.1 a single vectorised operation instead of five separate pipelines that could drift apart.
 
-⚠️ **Overlap warning:** if two FOMC events are, say, 30 trading days apart and you use *h* = 20, the 20-day windows of consecutive events don't overlap — good. But be careful if you ever densify the event set; overlapping forward returns are autocorrelated and inflate significance. With ~8 events/year (~32 trading days apart) and *h* ≤ 20, overlap is minimal — note it and move on.
+⚠️ 🔧 **Overlap warning — the original text here was WRONG, and Phase 1 measured it.**
+
+The original claim was: *"With ~8 events/year (~32 trading days apart) and h ≤ 20, overlap is minimal — note it and move on."* That reasoning uses the **average** spacing and ignores the **minimum**. Measured on the real 225-event sample:
+
+| | sessions |
+|---|---|
+| median gap between events | 30 |
+| **minimum gap** | **3** |
+
+**Overlapping pairs, by horizon:**
+
+| *h* | overlapping pairs | verdict |
+|---|---|---|
+| 1 | 0 | clean |
+| 3 | 0 | clean |
+| **5 (primary)** | **1** | 2007-08-08 → 2007-08-13 |
+| 10 | 8 | material |
+| 20 | **16** | **substantial — 7% of the sample** |
+
+**Why the average was misleading:** unscheduled meetings cluster *inside* the gaps between scheduled ones, and they cluster precisely during crises — 2007-08, 2008-01, 2008-03, 2008-10, 2020-03. So the overlap is not spread evenly; it is concentrated in the highest-volatility, highest-signal episodes, which is the worst place for it.
+
+**Why it matters (PLAN.md §14.4):** the IC t-statistic assumes independent observations. Overlapping windows share price moves, so returns are autocorrelated, the *effective* sample is smaller than *n*, and the t-statistic is **inflated** — significance you have not earned.
+
+**What we do about it, in order of preference:**
+1. **Report it.** `check_overlap()` enumerates every offending pair at every horizon; the number goes in the results table, not a footnote.
+2. **Prefer short horizons for the headline.** *h* ∈ {1, 3} are provably clean; *h* = 5 has a single pair.
+3. **Newey–West standard errors** at *h* ≥ 10 — an estimator that stays valid under autocorrelation (hence `statsmodels` in the dependency list).
+4. **Robustness check:** rerun with `include_unscheduled: false`, which removes most of the clustering, and compare.
+
+💬 *"My plan asserted overlap was negligible because events average 32 sessions apart. When I measured it, the minimum gap was 3 sessions and 16 pairs overlapped at h=20 — because emergency meetings cluster inside the gaps, during exactly the crises that dominate the return variance. So I moved my headline to short horizons and used Newey–West at the long ones."*
 
 ### 4.4 Step D — The trading rule (signal → position)
 
@@ -705,8 +812,8 @@ The schema enforces, among others:
 | Phase | Scope | State |
 |---|---|---|
 | **0** | Scaffolding, environment, typed config, test harness | ✅ **complete** — 2026-08-04 |
-| **1** | FOMC statements + SPY prices + leak-free alignment → `panel.parquet` | ⬜ next |
-| **2** | FinBERT scoring → `sentiment_scores.csv` | ⬜ |
+| **1** | FOMC statements + SPY prices + leak-free alignment → `panel.parquet` | ✅ **complete** — 2026-08-04 |
+| **2** | FinBERT scoring → `sentiment_scores.csv` | ⬜ **next** |
 | **3** | Trailing Z-score signal + positions | ⬜ |
 | **4** | IC, bootstrap CIs, diagnostics, research notebook | ⬜ |
 | **5** | Robustness sweeps, minutes corpus | ⬜ (stretch) |
@@ -747,7 +854,39 @@ The schema enforces, among others:
 
 ---
 
-### Phase 1 — Data pipeline (Days 1–2) ⬜ **NEXT**
+### Phase 1 — Data pipeline (Days 1–2) ✅ **COMPLETE** — 2026-08-04
+
+**Delivered:** `data/processed/panel.parquet`, **n = 225** events (2000-02-02 → 2026-07-29), 212 scheduled + 13 unscheduled, **51 tests passing** (up from 31), ruff clean.
+
+**✅ DoD — verified, with the command that verified each item:**
+
+| Criterion | Command | Result |
+|---|---|---|
+| NYSE calendar cross-check empty | `scripts/fetch_prices.py` | **PASS** — 8,434 sessions, **zero** discrepancies over 33.5 years |
+| Statements scraped + hashed | `scripts/scrape_fomc.py` | 393 documents (244 statements, 149 minutes), **manifest integrity PASS** |
+| Realised count printed, not assumed | `scripts/build_panel.py` | funnel printed: 393 → 244 → 241 → **225** |
+| Zero silent drops | same | `244 == 241 + 3` ✅ (3 flagged, all 1994–95, all outside the sample) |
+| 5 known meetings spot-checked | same | all correct, incl. the two pre-open cases |
+| `test_align_no_lookahead` passes | `uv run pytest` | **20/20** (11 synthetic + 9 integration) |
+| Forward-return NaNs only in the tail | `scripts/build_panel.py` | 0 NaN at *h*=1; exactly 1 at *h*≥3 (the most recent meeting) |
+| Overlap verified, not assumed | same | **measured and reported** — see the correction in §4.3 |
+
+**Five findings that changed the project:**
+
+1. **The disclosure regime changed** (§3.1.1) — the Fed only announced policy *changes* until 1999; 1996 has zero statements. Sample start moved 1994 → 2000.
+2. **Four URL eras, not three** — the `boarddocs` era (1997–2005, **61 statements**) was missing from the plan. A pattern-based scraper would have silently returned nothing for nine years.
+3. **Documents state their own release time** (§3.3.1) — 88 statements now carry an evidence-based timestamp, and both hand-entered overrides were independently confirmed.
+4. **Overlap was materially understated** (§4.3) — 16 overlapping pairs at *h*=20, minimum gap **3 sessions**, not the "~32" the average implied.
+5. **A soft-404 body is ~1,170 characters** — above the 500-char flag threshold, so a length check alone is insufficient; content is checked too.
+
+**Two bugs the discovery dry-run caught before any download** — neither would have raised an error:
+- `_is_scheduled()` returned `False` for "no evidence", mislabelling **all 61 modern-era statements** as unscheduled.
+- The `monetary{date}a.htm` suffix is *not* sufficient in the modern era: the annual *Statement on Longer-Run Goals* lives there too and was being ingested as a policy statement.
+
+---
+
+<details>
+<summary><b>Phase 1 as planned</b> (kept for comparison with what actually happened)</summary>
 
 **Goal:** a leak-free, timestamped, merged dataset of FOMC text + SPY prices. **No sentiment yet.**
 
@@ -810,7 +949,9 @@ Five assertions, already written:
 - `panel.parquet` has no NaNs in forward-return columns except the unavoidable tail.
 - `check_overlap()` confirms minimum event spacing > 20 trading days (or the exceptions are enumerated).
 
-**Deliverable:** `panel.parquet` + passing alignment test. **Commit. Update STATUS.md and §16.**
+**Deliverable:** `panel.parquet` + passing alignment test.
+
+</details>
 
 ---
 
@@ -954,7 +1095,10 @@ Status column: 🛡️ = mitigation implemented and verified; 🔶 = mitigation 
 | **Overfitting the knobs** | Illusory edge | Pre-registration in `config.yaml`, **enforced by `test_preregistered_primary_values`**; full-grid reporting | 🛡️ §6.3.1 |
 | **Ignoring costs** | Fictional Sharpe | Cost-sensitivity curve (§8.2); `bps_grid: [0,1,2,5,10]` in config | 🔶 Phase 4 |
 | 🔧 **Adjusted-price / dividend errors** | Biased returns (~1.3%/yr) | `auto_adjust: true` on all four OHLC columns; open-to-open; `test_price_fields_are_consistent` | 🛡️ §3.4 |
-| **Silent parse failure → phantom neutral scores** | Dilutes signal invisibly | `parse_statement()` flags short extractions; DoD requires `n_scraped == n_parsed + n_flagged` | 🔶 Phase 1 |
+| **Silent parse failure → phantom neutral scores** | Dilutes signal invisibly | Flags short extractions **and soft-404 bodies** (a Fed 404 renders ~1,170 chars, above the length threshold — length alone is insufficient); `n_scraped == n_parsed + n_flagged` asserted | 🛡️ §7 Phase 1 |
+| 🔧 **Overlapping forward returns at long horizons** | Inflated t-stats; unearned significance | **Measured, not assumed:** 16 pairs at *h*=20, min gap 3 sessions. Headline moves to *h* ∈ {1,3,5}; Newey–West at *h* ≥ 10; `include_unscheduled: false` robustness run | 🛡️ measured §4.3 |
+| 🔧 **Disclosure-regime break (1994–1998)** | Selection effect + a 28-month Z-window posing as 9 months | Sample starts 2000-01-01; pre-2000 documents retained as a labelled robustness check | 🛡️ §3.1.1 |
+| 🔧 **Unverified release times** | Guessing early = look-ahead | Times parsed from the documents (88/225); config schema **enforces** the default is post-open; precedence keeps a regex from overturning researched values | 🛡️ §3.3.1 |
 | **Regime dependence** (Fed↔market link varies) | Non-stationary edge | Discuss; optional regime split in Phase 5 | ⬜ accepted |
 | **`quantstats`/pandas version clash** | Broken tearsheet | Moved behind an optional `--extra tearsheet`; headline metrics hand-computed so results never depend on it | 🛡️ §6.2.4 |
 | **Scraper breakage / site format drift** | Pipeline stalls | Crawl index pages, never construct document URLs; cache raw once; sha256 manifest; parse defensively | 🔶 Phase 1 |
@@ -1323,16 +1467,27 @@ Schemas of every artifact. All dates are timezone-aware `America/New_York` unles
 
 **`data/processed/sentiment_scores.csv`** — one row per document; `doc_id`, `event_date`, `S_count`, `S_prob`, `n_sentences`, `n_pos`, `n_neg`, `n_neu`, `mean_confidence`. **The expensive cache.**
 
-**`data/processed/panel.parquet`** — the analysis table, one row per event
+**`data/processed/panel.parquet`** — the analysis table, one row per event. 🔧 As actually built (n = 225):
 
 | Column | Added in | Meaning |
 |---|---|---|
-| `event_date`, `release_datetime`, `release_time_source`, `doc_type`, `raw_path` | 1 | identity and provenance |
-| `entry_date` | 1 | first trading day **strictly after** release |
-| `fwd_ret_1/3/5/10/20` | 1 | open-to-open adjusted returns |
+| `doc_date` | 1 | date in the URL. Empirically the **publication** date, not the meeting date (a conference call on the 7th can publish on the 8th). Replaces the plan's `event_date`. |
+| `meeting_heading` | 1 | the index heading verbatim, e.g. `"October 7 Conference Call - 2008"` |
+| `is_scheduled` | 1 | derived from the heading; `False` for conference calls / unscheduled / notation votes |
+| `release_datetime` | 1 | **tz-aware `America/New_York`** — the only timestamp allowed to drive trading |
+| `release_time_source` | 1 | `manual_override` \| `parsed_from_document` \| `scheduled_default` |
+| `parsed_release_time` | 1 | what the document said about itself, kept even when an override wins, so disagreements are auditable |
+| `entry_date` | 1 | first session whose **09:30 open** is strictly after `release_datetime` |
+| `url`, `raw_path`, `source_index`, `anchor_text` | 1 | provenance back to the manifest and the index page |
+| `n_chars`, `selector_used`, `is_error_page`, `is_flagged` | 1 | parse quality; `is_flagged` = too short **or** a soft-404 body |
+| `fwd_ret_1/3/5/10/20` | 1 | open-to-open adjusted returns, *h* in **sessions** |
 | `S_count`, `S_prob` | 3 | raw document sentiment |
 | `mu`, `sigma`, `Z` | 3 | trailing stats and the surprise; NaN for the first *L* |
 | `position` | 3 | −1 / 0 / +1 from the threshold rule |
+
+**`data/processed/spy_prices_meta.json`** — provenance sidecar for the price download: ticker, `auto_adjust`, yfinance version, UTC download time, row count, first/last session. Necessary because `period="max"` makes the result depend on the date it was fetched.
+
+**`data/interim/discovery.parquet`** — the crawl plan, cached so the parser can be improved and re-run with **no network access at all**.
 
 ---
 
@@ -1344,6 +1499,7 @@ Every entry records what changed and why. Per §0.2, no substantive edit to this
 |---|---|---|
 | 2026-07-23 | — | Initial plan authored (§§0–12 + Appendix A). |
 | 2026-08-04 | *(see `git log`)* | **Phase 0 executed.** Repo scaffolded, environment built and verified, config written and validated, 31 tests passing, GPU confirmed by real kernel launch. |
+| 2026-08-04 | *(see `git log`)* | **Phase 1 executed.** SPY prices (8,434 sessions, NYSE cross-check clean); 393 documents scraped with sha256 provenance; `panel.parquet` built, **n = 225**; 51 tests passing. Corrected §3.1 (disclosure regime, sample start 1994→2000), §3.3.1 (session-open entry rule + release times parsed from documents), §3.5 (measured funnel, n=219 usable), §4.3 (**overlap was understated** — 16 pairs at *h*=20, min gap 3 sessions), §7 Phase 1 → complete, §15 (real schema). Config: `start_date` 2000-01-01, `scrape_start_date`, `sample.include_unscheduled`, `min_text_chars`, `session_open_time_et`. |
 | 2026-08-04 | *(this session)* | **Plan reconciled with reality.** Corrected §3.4 (`Adj Close` cannot yield an adjusted Open → `auto_adjust: true`) and §3.3 (`release_date + 1` is wrong → tz-aware timestamps + `searchsorted`). Updated §3.5 (n ≈ 263, not 240, and added the minimum-detectable-effect framing), §6.1 (actual layout, four deviations), §6.2 (Python 3.12, uv + lockfile, cu128/Blackwell, transformers 5.x), §6.3 (typed config), §7 (Phase 0 marked complete with verification commands; Phase 1 reordered and detailed with the three URL eras), §10 (risk register rebuilt with status column and six new risks), §11 (glossary tripled, grouped), Appendix A (matches `config.yaml`). Added §2.3 FinBERT label-ordering trap and the observed hawkish→positive misread. **New:** §0.1–0.2 (document roles and maintenance protocol), §13 (component reference), §14 (methodology deep-dive incl. power analysis and the Fundamental Law), §15 (data dictionary), §16 (this log). **New file:** `STATUS.md`. |
 
 ---

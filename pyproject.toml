@@ -92,10 +92,18 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]  # pycodestyle, pyflakes, isort, pyupgrade, bugbear
 
-[tool.uv]
-# This is a research repo, not a distributable library: there is nothing to
-# build or publish, so uv should manage the environment without trying to
-# install the project itself. `src` is made importable by the root conftest.py
-# (pytest prepends the rootdir when a conftest lives there) and, for notebooks,
-# by the two-line sys.path preamble documented in README.md.
-package = false
+# The project installs itself into .venv in *editable* mode, so `import src...`
+# works identically from pytest, from `uv run python scripts/*.py`, and from a
+# notebook -- without any sys.path manipulation.
+#
+# "Editable" means the install points at this source tree rather than copying it,
+# so edits take effect immediately with no reinstall. This replaces the common
+# research-repo habit of prepending sys.path in every entry point, which works
+# until something is invoked from an unexpected directory and then fails
+# confusingly.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["src"]

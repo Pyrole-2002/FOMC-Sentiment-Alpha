@@ -14,7 +14,37 @@
 # ===========================================================================
 
 data:
-  start_date: "1994-01-01"   # First regular post-meeting FOMC statements (Feb 1994).
+  # --- SAMPLE START: changed 1994 -> 2000 in Phase 1, with cause -------------
+  # The Fed's DISCLOSURE REGIME changed underneath the data. From 1994 to 1998
+  # the FOMC issued a statement ONLY when it changed policy; from May 1999 it
+  # issued one after every meeting. Verified statement counts per year:
+  #     1994: 6   1995: 3   1996: 0 (!)   1997: 1   1998: 3   1999: 6
+  #     2000+: 8 per year, consistently
+  #
+  # Two consequences, either of which alone justifies the change:
+  #
+  # (1) SELECTION EFFECT. Before 1999 the mere EXISTENCE of a statement means
+  #     "policy just moved" -- a louder signal than its tone. Pooling those years
+  #     mixes two data-generating processes and risks a spurious positive IC
+  #     driven by the existence effect rather than by FinBERT reading tone.
+  #
+  # (2) THE Z-SCORE BREAKS. Section 4.2's trailing window assumes roughly regular
+  #     event spacing: "L = 6 meetings" is meant to proxy "the last ~9 months of
+  #     policy". With 1996 empty, a 6-meeting lookback at the 1997-03 statement
+  #     reaches back to 1994-11 -- a 28-month window masquerading as a 9-month
+  #     one. mu and sigma would describe a different policy era entirely.
+  #
+  # Cost of the change: ~19 events (8% of sample). The minimum detectable IC
+  # worsens from 0.127 to 0.132 -- statistically nothing -- in exchange for a
+  # homogeneous data-generating process. Decided BEFORE any returns were viewed.
+  start_date: "2000-01-01"
+
+  # We still SCRAPE from 1994 (raw data is cheap and immutable, and re-crawling
+  # someone else's server later is discourteous). The 1994-1999 documents are
+  # stored and available as a labelled robustness check; they are simply not in
+  # the primary sample.
+  scrape_start_date: "1994-01-01"
+
   end_date: null             # null => today. Pin a date to freeze the sample.
   ticker: "SPY"              # SPDR S&P 500 ETF; began trading 1993-01-22.
 
@@ -51,9 +81,19 @@ scrape:
   timeout_seconds: 30
   max_retries: 3
 
-  # Phase 1 scope (PLAN.md section 3.2): statements only. Minutes carry the
-  # ~3-week release lag and are deferred to Phase 5 with their TRUE release date.
-  document_types: ["statement"]
+  # Minutes are SCRAPED in Phase 1 (one polite pass over a static archive beats
+  # two) but are NOT used until Phase 5 -- they never enter panel.parquet and no
+  # Phase 1-4 result depends on them. Their ~3-week release lag is the classic
+  # look-ahead trap, so their release date must be scraped as a first-class
+  # field and never inferred from the meeting they describe.
+  document_types: ["statement", "minutes"]
+
+  # A parsed document shorter than this is FLAGGED, not silently accepted.
+  # An empty statement scores as neutral -- a perfectly plausible-looking number
+  # that quietly dilutes the signal without ever raising an error. Silent
+  # degradation is more dangerous than loud failure. Real statements run
+  # ~2,000-6,000 characters; 500 is comfortably below any genuine one.
+  min_text_chars: 500
 
   # Default assumed release time for a SCHEDULED statement, US Eastern.
   # History: 1994-2012 releases were ~14:15 ET; 2013-present are 14:00 ET.
@@ -63,14 +103,31 @@ scrape:
 
   # Unscheduled / intermeeting statements do NOT follow the 14:00 rule and must
   # be overridden by hand. Each entry is stamped release_time_source="manual_override"
-  # so it is auditable rather than silently wrong. Two that matter:
-  #   2008-10-08 07:00 ET -- coordinated global emergency cut, released PRE-open.
-  #   2020-03-15 17:00 ET -- COVID cut to 0-0.25%, released on a SUNDAY.
-  # The Sunday case is precisely why "next trading day" must be a searchsorted
-  # into the real trading calendar, never release_date + 1 day.
+  # so it is auditable rather than silently wrong.
+  #
+  # ⚠️ THE SAFETY PRINCIPLE FOR UNKNOWN TIMES -- read before adding an entry.
+  # When a release time is unknown, the default of 14:00 assumes a LATE release,
+  # which pushes entry to the next session. That is CONSERVATIVE: it costs
+  # signal. Guessing an EARLY time is a LEAK: it would let us trade at an open
+  # that occurred before the text existed -- the cardinal sin (section 2.1).
+  # Therefore: only ever add an override you have VERIFIED. Erring late loses
+  # money on paper; erring early fabricates alpha.
+  #
+  # These two are verified and matter most:
+  #   2008-10-08 07:00 ET -- coordinated global emergency cut, released PRE-open,
+  #                          so entry is that SAME day's open, not the next.
+  #   2020-03-15 17:00 ET -- COVID cut to 0-0.25%, released on a SUNDAY, so there
+  #                          is no "next calendar day" that is a session by luck.
+  # Together they are why entry must be resolved against the real trading
+  # calendar AND against the session open time -- never release_date + 1 day.
   release_time_overrides:
     "2008-10-08": "07:00"
     "2020-03-15": "17:00"
+
+  # The NYSE regular session opens at 09:30 ET. This is the boundary the entry
+  # rule compares against (see align.py): a release strictly before that day's
+  # 09:30 is tradable at THAT open; anything at or after it is not.
+  session_open_time_et: "09:30"
 
 sentiment:
   model: "ProsusAI/finbert"
@@ -81,6 +138,27 @@ sentiment:
   device: "auto"             # "auto" | "cuda" | "cpu". auto => cuda if available.
   seed: 42                   # determinism: same input bytes => same scores, always.
   strip_boilerplate: false   # PRIMARY = off. Stripping vote-tally lines is a Phase 2 stretch goal.
+
+# ---------------------------------------------------------------------------
+# SAMPLE COMPOSITION -- which scraped documents enter the primary analysis.
+# ---------------------------------------------------------------------------
+sample:
+  # Unscheduled statements: emergency cuts, conference calls, notation votes.
+  # Verified examples in the 2000+ sample: 2001-01-03, 2001-04-18, 2001-09-17,
+  # 2007-08-17, 2008-01-22, 2008-03-11, 2008-10-08, 2010-05-09, 2020-03-03,
+  # 2020-03-15, 2020-03-23.
+  #
+  # INCLUDED (primary) because they are real releases with real timestamps and
+  # the largest market reactions -- excluding them would discard exactly the
+  # events where Fed language matters most. They carry an `is_scheduled` flag so
+  # the robustness check ("is the whole edge just a handful of crisis days?")
+  # is a one-line filter rather than a re-scrape.
+  #
+  # ⚠️ They break the tidy non-overlap story in section 4.3: 2020-03-03 and
+  # 2020-03-15 are only 8 trading days apart, so their h=20 forward-return
+  # windows OVERLAP and are autocorrelated. check_overlap() enumerates every
+  # such pair rather than letting the assumption stand unexamined.
+  include_unscheduled: true
 
 signal:
   zscore_window_L: 6         # trailing meetings used for mu/sigma (~9 months of policy)
@@ -113,6 +191,11 @@ robustness:
   threshold_theta: [0.5, 1.0, 1.5]
   aggregation: ["prob", "count"]
   entry: ["next_trading_open", "same_day_close"]
+  # Added in Phase 1 once the disclosure-regime break was discovered.
+  # "1994-01-01" reruns the whole analysis on the pre-1999 sparse-disclosure era
+  # -- expected to look different, and that difference is itself a finding.
+  sample_start: ["2000-01-01", "1994-01-01"]
+  include_unscheduled: [true, false]
 
 paths:
   data_raw: "data/raw"
