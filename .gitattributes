@@ -1,0 +1,11 @@
+# Normalise line endings so the repo is byte-identical on Windows and Linux.
+# Without this, a reviewer cloning on Linux sees every file as modified, and
+# CRLF/LF churn pollutes diffs.
+* text=auto eol=lf
+
+# Binary / generated -- never diff or normalise these.
+*.parquet binary
+*.pt       binary
+*.safetensors binary
+uv.lock    linguist-generated=true -diff
+requirements.txt linguist-generated=true

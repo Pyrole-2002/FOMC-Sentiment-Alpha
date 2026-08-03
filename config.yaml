@@ -1,0 +1,121 @@
+# ===========================================================================
+# fed-sentiment-alpha -- PRE-REGISTERED PRIMARY CONFIGURATION
+# ===========================================================================
+# PLAN.md section 5.1 ("Pre-registration"): this file is the single auditable
+# record of the parameter choices made BEFORE any return data was inspected.
+#
+# RULE: any value changed after Phase 4 results are first viewed must be
+# recorded in `robustness:` below, NOT edited in place. Editing a primary value
+# post-hoc to improve the result is exactly the p-hacking the plan warns about.
+#
+# Every value here is validated against a pydantic schema in src/config.py, so
+# a typo'd key or an out-of-range number is a startup error, not a silent
+# wrong answer three phases later.
+# ===========================================================================
+
+data:
+  start_date: "1994-01-01"   # First regular post-meeting FOMC statements (Feb 1994).
+  end_date: null             # null => today. Pin a date to freeze the sample.
+  ticker: "SPY"              # SPDR S&P 500 ETF; began trading 1993-01-22.
+
+  # --- CORRECTION to PLAN.md Appendix A ---------------------------------
+  # The plan says `price_field: "Adj Close"` while section 4.3 asks for the
+  # "Adjusted Open". These are incompatible: with auto_adjust=False, yfinance
+  # returns raw Open/High/Low/Close PLUS one extra `Adj Close` column -- there
+  # is no `Adj Open`. Mixing a raw Open with an adjusted Close injects every
+  # dividend into the return as a phantom loss (~1.3%/yr on SPY, compounded
+  # over 30 years -- a large bias).
+  #
+  # auto_adjust=True back-adjusts ALL FOUR OHLC columns consistently, so `Open`
+  # IS the adjusted open. That is what section 4.3 actually needs.
+  auto_adjust: true
+  entry_price_field: "Open"  # buy at the adjusted open of the first trading day after release
+  exit_price_field: "Open"   # ...and exit at the adjusted open h trading days later
+
+scrape:
+  # Index pages are crawled for anchors; document URLs are NEVER hardcoded,
+  # because Fed statement URLs changed format three times since 1994:
+  #   1994-2005  /fomc/{YYYYMMDD}default.htm
+  #   2006-2018  /newsevents/press/monetary/{YYYYMMDD}a.htm
+  #   2019-now   /newsevents/pressreleases/monetary{YYYYMMDD}a.htm
+  # Index-page structure is far more stable than document-URL conventions.
+  base_url: "https://www.federalreserve.gov"
+  calendar_url: "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"   # 2021 -> present
+  historical_url_template: "https://www.federalreserve.gov/monetarypolicy/fomchistorical{year}.htm"  # <= 2020
+  historical_year_start: 1994
+  historical_year_end: 2020
+
+  # Politeness. The archive is static; one careful pass is enough forever.
+  user_agent: "fed-sentiment-alpha/0.1 (academic research; contact: aryanbansal2002@gmail.com)"
+  request_delay_seconds: 1.0
+  timeout_seconds: 30
+  max_retries: 3
+
+  # Phase 1 scope (PLAN.md section 3.2): statements only. Minutes carry the
+  # ~3-week release lag and are deferred to Phase 5 with their TRUE release date.
+  document_types: ["statement"]
+
+  # Default assumed release time for a SCHEDULED statement, US Eastern.
+  # History: 1994-2012 releases were ~14:15 ET; 2013-present are 14:00 ET.
+  # Both are before the 16:00 close, so under the "next trading open" entry rule
+  # the distinction never changes an entry date -- but we record it honestly.
+  scheduled_release_time_et: "14:00"
+
+  # Unscheduled / intermeeting statements do NOT follow the 14:00 rule and must
+  # be overridden by hand. Each entry is stamped release_time_source="manual_override"
+  # so it is auditable rather than silently wrong. Two that matter:
+  #   2008-10-08 07:00 ET -- coordinated global emergency cut, released PRE-open.
+  #   2020-03-15 17:00 ET -- COVID cut to 0-0.25%, released on a SUNDAY.
+  # The Sunday case is precisely why "next trading day" must be a searchsorted
+  # into the real trading calendar, never release_date + 1 day.
+  release_time_overrides:
+    "2008-10-08": "07:00"
+    "2020-03-15": "17:00"
+
+sentiment:
+  model: "ProsusAI/finbert"
+  aggregation: "prob"        # PRIMARY = probability-weighted S_prob (PLAN.md 4.1b).
+                             # "count" (S_count, PLAN.md 4.1a) is a robustness check.
+  max_length: 512            # FinBERT's hard token limit; sentences are truncated to fit.
+  batch_size: 64             # sentences per forward pass; raise on GPU, lower if OOM.
+  device: "auto"             # "auto" | "cuda" | "cpu". auto => cuda if available.
+  seed: 42                   # determinism: same input bytes => same scores, always.
+  strip_boilerplate: false   # PRIMARY = off. Stripping vote-tally lines is a Phase 2 stretch goal.
+
+signal:
+  zscore_window_L: 6         # trailing meetings used for mu/sigma (~9 months of policy)
+  threshold_theta: 1.0       # |Z| above which we take a position
+  hypothesis_sign: "dovish_surprise_bullish"   # positive Z -> long SPY. A HYPOTHESIS to be
+                                               # tested, never a sign fitted to maximise return.
+
+backtest:
+  primary_horizon_days: 5    # the single horizon whose result is "the headline"
+  horizons_days: [1, 3, 5, 10, 20]   # full grid, reported in its entirety (PLAN.md 5.1)
+  entry: "next_trading_open" # strict leak guard: first trading day STRICTLY after release
+
+costs:
+  bps_grid: [0, 1, 2, 5, 10]         # 1 bp = 0.01% = 0.0001
+  cost_model: "per_unit_turnover"    # cost = bps * |position_t - position_{t-1}|
+
+evaluation:
+  ic_method_primary: "spearman"      # rank IC: robust to the fat tails of return data
+  bootstrap_iters: 10000
+  bootstrap_ci: 0.95
+  random_seed: 42                    # bootstrap reproducibility
+
+# ---------------------------------------------------------------------------
+# ROBUSTNESS SWEEPS -- explicitly NOT candidates for the headline result.
+# Reported as a full grid so the reader sees the whole distribution of
+# outcomes rather than a cherry-picked best cell (PLAN.md section 5.1).
+# ---------------------------------------------------------------------------
+robustness:
+  zscore_window_L: [6, 12]
+  threshold_theta: [0.5, 1.0, 1.5]
+  aggregation: ["prob", "count"]
+  entry: ["next_trading_open", "same_day_close"]
+
+paths:
+  data_raw: "data/raw"
+  data_interim: "data/interim"
+  data_processed: "data/processed"
+  reports: "reports"

@@ -1,0 +1,101 @@
+[project]
+name = "fed-sentiment-alpha"
+version = "0.1.0"
+description = "Do changes in FOMC communication sentiment predict short-horizon SPY returns?"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    # --- Data & numerics -------------------------------------------------
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "pyarrow>=16",          # parquet engine
+    "pyyaml>=6",            # config.yaml loader
+    "pydantic>=2.7",        # typed, validated config (fails loudly on typos)
+
+    # --- Market data -----------------------------------------------------
+    "yfinance>=0.2.50",
+    "pandas-market-calendars>=4.4",   # NYSE calendar, used to VALIDATE the SPY index
+
+    # --- Scraping --------------------------------------------------------
+    "requests>=2.32",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.2",            # fast, lenient HTML parser backend for bs4
+
+    # --- NLP -------------------------------------------------------------
+    # torch is pinned to the CUDA 12.8 index below (see [tool.uv.sources]).
+    # cu128 is the MINIMUM CUDA build that ships sm_120 kernels for Blackwell
+    # (RTX 50-series). cu126 and earlier will fail with
+    # "no kernel image is available for execution on the device".
+    "torch>=2.9",
+    "transformers>=4.44",
+    "nltk>=3.9",            # sentence tokenizer; regex fallback lives in sentiment.py
+
+    # --- Stats & analytics ----------------------------------------------
+    "scipy>=1.13",          # spearmanr, bootstrap
+    "scikit-learn>=1.5",    # confusion_matrix for the Fed-speak audit
+    "statsmodels>=0.14",    # Newey-West standard errors
+    "matplotlib>=3.9",
+    "seaborn>=0.13",
+
+    # --- Notebook --------------------------------------------------------
+    "jupyterlab>=4.2",
+    "ipywidgets>=8.1",      # tqdm progress bars inside notebooks
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+# quantstats is isolated because it historically pins narrow pandas ranges and
+# is the most likely dependency to break (PLAN.md section 10, risk register).
+# Install with:  uv sync --extra tearsheet
+# If it conflicts, drop it -- backtest.py computes Sharpe/MDD/win-rate by hand.
+tearsheet = ["quantstats>=0.0.62"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",            # linter + formatter, replaces black/flake8/isort
+]
+
+# ---------------------------------------------------------------------------
+# uv configuration
+# ---------------------------------------------------------------------------
+# PyTorch CUDA builds are NOT on PyPI. They live on a dedicated index.
+# `explicit = true` means: only packages that name this index in
+# [tool.uv.sources] may resolve from it. Without it, uv would search this
+# index for EVERY package and could silently pull odd forks of e.g. numpy.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
+# ---------------------------------------------------------------------------
+# Tooling
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# --strict-markers: a typo'd @pytest.mark.foo becomes an error, not a silent no-op.
+addopts = "-ra --strict-markers"
+markers = [
+    "slow: requires network access or a full FinBERT pass",
+    "gpu: requires a CUDA device",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]  # pycodestyle, pyflakes, isort, pyupgrade, bugbear
+
+[tool.uv]
+# This is a research repo, not a distributable library: there is nothing to
+# build or publish, so uv should manage the environment without trying to
+# install the project itself. `src` is made importable by the root conftest.py
+# (pytest prepends the rootdir when a conftest lives there) and, for notebooks,
+# by the two-line sys.path preamble documented in README.md.
+package = false
