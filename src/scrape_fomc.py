@@ -498,6 +498,11 @@ _NAV_LINES = frozenset(
     }
 )
 
+# Trailing breadcrumb on the 1997-2005 boarddocs template, e.g. "2002 Monetary
+# policy". Matched by pattern rather than listed literally because the year
+# varies. This is the only junk that survives nav-stripping on that era.
+_NAV_PATTERNS = (re.compile(r"^\d{4}\s+Monetary policy$", re.IGNORECASE),)
+
 # Phrases that mean "this is an error page", even when served with HTTP 200.
 _SOFT_404_MARKERS = (
     "page not found",
@@ -561,6 +566,7 @@ def _clean_text(raw: str) -> str:
     lines = [ln for ln in lines if ln]
     lines = [ln for ln in lines if not ln.startswith(_BOILERPLATE_PREFIXES)]
     lines = [ln for ln in lines if ln.strip(" |").lower() not in _NAV_LINES]
+    lines = [ln for ln in lines if not any(p.match(ln.strip(" |")) for p in _NAV_PATTERNS)]
     lines = [ln for ln in lines if ln.strip(" |")]
     return "\n".join(lines).strip()
 

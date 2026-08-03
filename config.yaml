@@ -167,7 +167,27 @@ signal:
                                                # tested, never a sign fitted to maximise return.
 
 backtest:
-  primary_horizon_days: 5    # the single horizon whose result is "the headline"
+  # The ONE horizon designated, before any result was computed, as the
+  # confirmatory test. The other four are exploratory. This matters because
+  # examining five horizons and reporting the best is effectively five tests:
+  # P(at least one clears 5% by chance) = 1 - 0.95^5 ~ 23%, not 5%.
+  #
+  # 🔧 REVIEWED 2026-08-04 after Phase 1 found ONE overlapping pair at h=5
+  # (2007-08-08 -> 2007-08-13, 3 sessions apart) while h=3 has none.
+  # DECISION: KEEP h=5. Reasoning, recorded before any IC was computed:
+  #   (a) The cost is negligible. One overlapping pair in 224 observations
+  #       reduces the effective sample by ~0.4%; the t-stat inflation is
+  #       invisible at two decimal places.
+  #   (b) The cost of CHANGING is larger. Pre-registration derives its value
+  #       from not being revised. "I inspected the data, then revised my primary
+  #       specification" is structurally indistinguishable from p-hacking to an
+  #       outside reader, however honest the motive.
+  #   (c) h=5 is also the better economic prior: one trading week is the natural
+  #       "market fully digests the statement" window; h=3 is closer to
+  #       microstructure.
+  # Instead: disclose the pair (section 4.3) and show in Phase 4 that dropping
+  # it leaves the result unchanged -- a robustness check, not a spec change.
+  primary_horizon_days: 5
   horizons_days: [1, 3, 5, 10, 20]   # full grid, reported in its entirety (PLAN.md 5.1)
   entry: "next_trading_open" # strict leak guard: first trading day STRICTLY after release
 

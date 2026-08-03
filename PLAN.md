@@ -195,6 +195,32 @@ $$\text{IC} = \text{corr}\big(\text{signal}_t,\; R_{t \to t+h}\big)$$
 
 ⚠️ **The sign trap:** FinBERT's "positive/negative" is about *sentiment*, not about *equities*. A hawkish statement might contain "positive" language about a *strong economy* — which can be *bearish* for stocks (because it implies rate hikes). We must not assume "positive sentiment → stocks up." We let the **data** determine the sign of the relationship (via IC), and we interpret the result through the hawkish/dovish lens. This nuance is gold in an interview.
 
+### 2.7.1 🔧 The sign trap is CONFIRMED — measured in Phase 2
+
+This was written as a caution. Phase 2 scored 3,846 sentences and turned it into a finding. Ranking every sentence by $p^+ - p^-$, here is what FinBERT considers most extreme:
+
+| Score | Sentence |
+|---|---|
+| **+0.942** | *"Economic activity expanded in the second quarter, partly reflecting growth in consumer spending"* |
+| **+0.941** | *"Household spending and business fixed investment have grown strongly."* |
+| **−0.965** | *"U.S. exports have slumped as a number of major trading partners have also fallen into recession"* |
+| **−0.964** | *"Business equipment spending and industrial production have weakened in recent months"* |
+
+🧠 **Every one describes the state of the economy. Not one describes the policy stance.**
+
+FinBERT is measuring *"is the economy doing well?"* — not *"is the Fed turning hawkish or dovish?"* Those are different axes, and for equities they can point in **opposite** directions:
+
+```
+strong economy  →  FinBERT: POSITIVE  →  implies HAWKISH Fed  →  headwind for stocks
+weak economy    →  FinBERT: NEGATIVE  →  implies DOVISH Fed   →  tailwind for stocks
+```
+
+**Why this matters for the hypothesis.** Our pre-registered sign is `dovish_surprise_bullish`: positive Z → long SPY. But if FinBERT's "positive" tracks *economic strength*, and economic strength implies tightening, then **a negative IC is the economically coherent outcome** — not evidence of a bug, and not a reason to flip the rule after the fact.
+
+⚠️ **This is precisely why the sign must be fixed in advance and then tested.** Had we not pre-registered it, the temptation on seeing a negative IC would be to "fix the sign" and declare victory — which is fitting a binary parameter to the data on ~219 observations. Instead we now have a *falsifiable prediction with a stated mechanism*, which is a far stronger position either way.
+
+💬 *"I ranked every sentence FinBERT scored and found its extremes are all descriptions of economic conditions, never of policy stance. So FinBERT measures 'is the economy good', which for equities is nearly the inverse of 'is the Fed dovish'. That reframed my expected sign — and because I'd pre-registered it, I could say so before seeing a single return."*
+
 ---
 
 ## 3. The data reality of the FOMC
@@ -426,7 +452,24 @@ $$S_t^{\text{prob}} = \frac{1}{N}\sum_{i=1}^{N} \big(p^+_i - p^-_i\big)$$
 
 🧠 **Why offer both?** The count version throws away confidence (a 51%-positive sentence counts the same as a 99%-positive one). The probability version keeps it. But the count version is more robust to FinBERT being *slightly* miscalibrated on Fed-speak. We compute both, and report which gives a cleaner IC. **Deciding between them is itself a research finding**, not a coin flip — and we must fix the choice *before* looking at returns to avoid cherry-picking (Section 5).
 
-⚠️ **Boilerplate contamination:** FOMC statements contain repeated procedural sentences ("Voting for the monetary policy action were..."). These are sentiment-neutral noise. A refinement (Phase 2 stretch goal): strip known boilerplate / vote-tally lines before scoring, and document the effect.
+🔧 **Measured in Phase 2: the two aggregations agree at ρ = 0.971 (Pearson), 0.967 (Spearman).**
+
+That is worth reporting for a reason beyond curiosity: it means the pre-registered `prob` vs `count` choice **barely matters**, which removes one researcher degree of freedom from §5.1's multiple-testing budget. A knob that cannot change your answer is not a knob you can p-hack with.
+
+⚠️ **Boilerplate contamination — measured, and it is NOT neutral.** FOMC statements contain repeated procedural sentences ("Voting for the monetary policy action were...", "In taking the discount rate action..."). The plan assumed these were sentiment-neutral noise. Phase 2 measured them:
+
+| | |
+|---|---|
+| Boilerplate share of all sentences | **11.1%** (427 / 3,846) |
+| FinBERT's labels on boilerplate | 400 neutral, 20 negative, **7 positive** |
+| Mean $p^+ - p^-$ on boilerplate | **−0.065** |
+| Mean $p^+ - p^-$ on real policy text | **+0.124** |
+
+So boilerplate is *mostly* neutral but tilts **negative**, and at 11% of sentences it drags every document score down by a non-trivial amount.
+
+🧠 **Why this is a potential confound rather than mere noise.** Statement length grew substantially across the sample (Greenspan-era statements average ~1,500 characters; post-2008 statements ~2,950). The vote tally, however, is roughly *constant* in length. So boilerplate is a **larger fraction of early documents than late ones** — meaning the dilution is **era-correlated**. A systematic, time-varying bias is far more dangerous than random noise, because it can masquerade as a trend.
+
+Stripping remains **off** for the primary result (`strip_boilerplate: false`, pre-registered) and on for the robustness check, so the effect is reported rather than assumed either way.
 
 ### 4.2 Step B — The Sentiment Delta / rolling Z-score ($Z_t$)
 
@@ -445,6 +488,20 @@ Z = (S - mu) / sigma
 Forgetting the `.shift(1)` (or using pandas' default centered/expanding stats that peek at the current value) is a textbook leak. We will **unit-test** this: the Z at time *t* must be reproducible using only rows `< t`.
 
 🧠 **Why Z-score and not raw $S_t$?** Three reasons: (1) removes the persistent baseline tone; (2) makes the signal **stationary-ish** and comparable across regimes (the Fed of 2008 vs. 2021); (3) puts the signal on a natural, unit-free scale so a threshold like "±1 standard deviation" is meaningful. The cost: the first *L* meetings have no signal (undefined window) — we discard them, and we lose a little sample. Worth it.
+
+🔧 **Phase 2 measured the non-stationarity, and it is large.** Mean $S^{\text{prob}}$ by policy era:
+
+| Era | *n* | mean $S^{\text{prob}}$ | sd |
+|---|---|---|---|
+| 2000–07 pre-GFC | 69 | **+0.168** | 0.213 |
+| 2008–15 ZIRP | 68 | **+0.039** | 0.157 |
+| 2016–21 | 51 | **+0.133** | 0.146 |
+| 2022–26 hiking | 37 | **+0.055** | 0.101 |
+
+The mean level swings by **more than a full within-era standard deviation** across regimes. Two things follow:
+
+1. **The Z-score is not a stylistic preference — it is load-bearing.** Feeding raw $S_t$ into an IC would largely measure *"which decade is this?"*, and since the market also trends across decades, that would manufacture correlation out of two shared time trends. This is the classic **spurious-regression** trap: two non-stationary series can correlate strongly while having no relationship at all.
+2. **The volatility of tone is itself falling** (sd 0.213 → 0.101). Dividing by a *trailing* σ adapts to that automatically, which a fixed threshold on raw scores could not.
 
 **Design knobs (to be fixed before evaluation, see Section 5):** window length *L* ∈ {6, 12}, and whether *S* is the count or probability version. We pre-register a **primary** configuration and treat the rest as robustness checks.
 
@@ -813,8 +870,8 @@ The schema enforces, among others:
 |---|---|---|
 | **0** | Scaffolding, environment, typed config, test harness | ✅ **complete** — 2026-08-04 |
 | **1** | FOMC statements + SPY prices + leak-free alignment → `panel.parquet` | ✅ **complete** — 2026-08-04 |
-| **2** | FinBERT scoring → `sentiment_scores.csv` | ⬜ **next** |
-| **3** | Trailing Z-score signal + positions | ⬜ |
+| **2** | FinBERT scoring → `sentiment_scores.csv` | ✅ **complete** — 2026-08-04 |
+| **3** | Trailing Z-score signal + positions | ⬜ **next** |
 | **4** | IC, bootstrap CIs, diagnostics, research notebook | ⬜ |
 | **5** | Robustness sweeps, minutes corpus | ⬜ (stretch) |
 
@@ -955,7 +1012,39 @@ Five assertions, already written:
 
 ---
 
-### Phase 2 — NLP engine (Days 3–4)
+### Phase 2 — NLP engine (Days 3–4) ✅ **COMPLETE** — 2026-08-04
+
+**Delivered:** `sentiment_scores.csv` (225 rows) + `sentence_scores.parquet` (3,846 rows). **72 tests passing** (up from 51), ruff clean. Scoring takes **11.8 s on the GPU** (~290 sentences/sec).
+
+**✅ DoD — verified, with the command that verified each item:**
+
+| Criterion | Evidence |
+|---|---|
+| One row per eligible statement | **225 rows**, matching `panel.parquet` exactly; zero duplicates |
+| Both aggregations populated | `S_prob` and `S_count`, no NaN, both within [−1, 1] |
+| Sentence-level cache saved | 3,846 rows with per-sentence probabilities, labels, token counts |
+| Probabilities sum to 1 | max deviation **1.19 × 10⁻⁷** (float32 rounding) |
+| `id2label` ordering pinned | `{0: positive, 1: negative, 2: neutral}` asserted against the live checkpoint |
+| No document lost or empty | min sentences/doc = 5; zero empty documents |
+| **Nothing truncated** | longest sentence **177 tokens** vs the 512 limit — no text discarded |
+| **Byte-identical re-runs** | SHA256 of *both* caches unchanged across independent GPU runs |
+| Boilerplate quantified | **11.1%** of sentences; mean net −0.065 vs +0.124 on real text |
+
+**Four findings:**
+
+1. **The sign trap is confirmed, not merely possible** (§2.7.1) — FinBERT's extreme sentences are *all* descriptions of economic conditions, never of policy stance. A negative IC is now the economically coherent prediction.
+2. **Tone is strongly non-stationary** (§4.2) — mean $S^{\text{prob}}$ swings from +0.168 to +0.039 across regimes, more than a within-era standard deviation. The Z-score is load-bearing, not cosmetic.
+3. **Boilerplate is 11% of sentences and tilts negative**, and because statement length grew over time the dilution is **era-correlated** — a potential confound, not just noise (§4.1).
+4. **The two aggregations correlate at ρ = 0.971**, so the pre-registered choice barely matters — one fewer researcher degree of freedom.
+
+**One silent-failure bug caught by a test:** `doc_id` is `"20260128"`, which CSV inference parses as **int64** while parquet preserves **str**. A Phase 3 merge on that key would have matched zero rows and returned an empty frame **without raising anything**. Fixed with `load_sentiment_scores()`, which is now the only sanctioned way to read the cache.
+
+**Q6 resolved:** the 51 `whole_page_fallback` parses (the 1997–2005 `boarddocs` era) are **clean** — the fallback recovers proper policy prose. Their shorter average length (1,498 vs 2,950 chars) is **real history**, not a parsing artefact: Greenspan-era statements were genuinely terse before forward guidance and balance-sheet language expanded them. Attributing that gap to the parser would have been a real analytical error.
+
+---
+
+<details>
+<summary><b>Phase 2 as planned</b></summary>
 
 **Goal:** turn each document into a raw sentiment score $S_t$, cached to CSV.
 
@@ -974,8 +1063,10 @@ Five assertions, already written:
 
 ⚠️ **Determinism:** set seeds and use `eval()`/`no_grad()` so re-runs are byte-identical — reproducibility is a research value *and* an interview talking point.
 
-**✅ DoD:** `sentiment_scores.csv` exists with one row per parsed document (~270 expected — the exact count established in Phase 1, not assumed), both `S_count` and `S_prob` populated; sentence-level cache saved; shape tests pass, **including the `id2label` ordering assertion**; re-running produces byte-identical numbers.
-**Deliverable:** the two cache files. **Commit** (but consider whether to commit large data — likely `.gitignore` the CSVs and commit a checksum + the code that regenerates them).
+**✅ DoD:** `sentiment_scores.csv` exists with one row per parsed document, both `S_count` and `S_prob` populated; sentence-level cache saved; shape tests pass, **including the `id2label` ordering assertion**; re-running produces byte-identical numbers.
+**Deliverable:** the two cache files.
+
+</details>
 
 ---
 
@@ -1054,6 +1145,14 @@ These three artifacts are the difference between "a backtest" and "research." Ea
 1. Extract, from the cached sentence scores, the **top-10 most negative (hawkish-flavored)** and **top-10 most positive (dovish-flavored)** sentences FinBERT found. Read them like a human. Do they *look* hawkish/dovish? This is a **sanity check on the black box.**
 2. Optionally, a genuine **confusion matrix**: on a small hand-labeled sample of Fed sentences (you label ~30 as hawk/dove/neutral), compare to FinBERT's labels with `sklearn.metrics.confusion_matrix`. Quantifies FinBERT's agreement with domain-expert judgment on *central-bank* language specifically.
 **Why it impresses:** it proves you **did not blindly trust the AI.** You interrogated whether a news-trained model actually comprehends Fed-speak — the exact skepticism a research desk wants. If FinBERT systematically mislabels hedged Fed language, *that's a finding*, and it explains a weak IC.
+
+🔧 **Part 1 is already done, and it returned a verdict — Phase 2.** The top-10 read is in §2.7.1. The result is sharper than "FinBERT is noisy on Fed-speak":
+
+> **FinBERT's extremes are entirely descriptions of economic conditions. Not one is a description of policy stance.**
+
+So the model is not *failing* — it is succeeding at a **different task than the one we need**. It reliably answers *"is the economy doing well?"*; we asked *"is the Fed turning dovish?"* For equities those are close to inverses, because a strong economy implies tightening.
+
+That distinction — *wrong axis*, not *high variance* — is the interesting version of this diagnostic, and it changes what the hand-labelling exercise in part 2 should test. **Label the ~30 sentences on BOTH axes:** hawk/dove/neutral (policy stance) *and* good/bad/neutral (economic conditions). Then compute FinBERT's agreement with each. The prediction is high agreement with the economic axis and near-zero (or negative) agreement with the policy axis. A two-axis confusion matrix converts an anecdote into a measurement, and it is a much stronger artifact than a single one-axis matrix.
 💬 *"FinBERT was trained on analyst news, not central-bank prose. Before trusting its signal, I audited its most extreme classifications by hand and against a small labeled set — model interpretability isn't optional when the model is upstream of every trade."*
 
 ---
@@ -1091,7 +1190,10 @@ Status column: 🛡️ = mitigation implemented and verified; 🔶 = mitigation 
 | **Look-ahead via Z-score window** | Fatal | Mandatory `.shift(1)`; `test_zscore_no_lookahead` rebuilds Z from rows `< t` independently | 🔶 written, skipped |
 | **Look-ahead via entry date** | Fatal | `searchsorted(side="right")`; `test_align_no_lookahead` (5 assertions incl. the two emergency meetings) | 🔶 written, skipped |
 | 🔧 **FinBERT label ordering is `{0:pos, 1:neg, 2:neu}`** | **Silent total sign inversion** — nothing crashes | Index by name from `config.id2label`, never by position; pinned by a test | 🛡️ documented §2.3 |
-| **FinBERT out-of-domain on Fed-speak** | Weak/biased signal | Confusion-matrix audit (§8.3); count vs prob aggregation; **already observed** scoring a hawkish sentence as positive | 🔶 Phase 4 |
+| 🔧 **FinBERT measures the WRONG AXIS** — economic conditions, not policy stance | **The central modelling risk.** Its "positive" ≈ "strong economy" ≈ hawkish ≈ bearish for equities — near the inverse of what we want | **Confirmed** over 3,846 sentences (§2.7.1). Sign pre-registered *before* this was known, so it remains a falsifiable test; §8.3 upgraded to a two-axis confusion matrix to quantify it | 🛡️ measured §2.7.1 |
+| 🔧 **Boilerplate dilution is era-correlated** | A time-varying bias can masquerade as a trend | Measured: 11.1% of sentences, mean net −0.065 vs +0.124; constant-length vote tallies are a bigger share of the shorter early statements. Robustness run with `strip_boilerplate: true` | 🔶 Phase 4 |
+| 🔧 **Tone is strongly non-stationary** | Raw levels would produce spurious correlation with any trending series | Measured: mean swings +0.168→+0.039 across regimes. The trailing Z-score (§4.2) is load-bearing, not cosmetic | 🛡️ §4.2 |
+| 🔧 **Silent dtype mismatch on join keys** | An empty merge that raises nothing | `doc_id` is int64 from CSV, str from parquet. `load_sentiment_scores()` is now the only sanctioned reader; dtype pinned by a test | 🛡️ §7 Phase 2 |
 | **Overfitting the knobs** | Illusory edge | Pre-registration in `config.yaml`, **enforced by `test_preregistered_primary_values`**; full-grid reporting | 🛡️ §6.3.1 |
 | **Ignoring costs** | Fictional Sharpe | Cost-sensitivity curve (§8.2); `bps_grid: [0,1,2,5,10]` in config | 🔶 Phase 4 |
 | 🔧 **Adjusted-price / dividend errors** | Biased returns (~1.3%/yr) | `auto_adjust: true` on all four OHLC columns; open-to-open; `test_price_fields_are_consistent` | 🛡️ §3.4 |
@@ -1463,9 +1565,11 @@ Schemas of every artifact. All dates are timezone-aware `America/New_York` unles
 
 **`data/processed/spy_prices.parquet`** — indexed by trading date *(naive)*; columns `Open/High/Low/Close/Volume`, all split- and dividend-adjusted (`auto_adjust=True`). **This index is the trading-day calendar.**
 
-**`data/processed/sentence_scores.parquet`** — one row per sentence; `doc_id`, `sentence_idx`, `sentence`, `p_pos`, `p_neg`, `p_neu`, `label`, `n_tokens`. Feeds the §8.3 extreme-sentence audit without re-running FinBERT.
+**`data/processed/sentence_scores.parquet`** — 🔧 3,846 rows, one per sentence: `doc_id` (str), `doc_date`, `sentence_idx`, `sentence`, `p_pos`, `p_neg`, `p_neu`, `label`, `n_tokens`, `is_boilerplate`. Feeds the §8.3 audit and the boilerplate robustness check without re-running FinBERT.
 
-**`data/processed/sentiment_scores.csv`** — one row per document; `doc_id`, `event_date`, `S_count`, `S_prob`, `n_sentences`, `n_pos`, `n_neg`, `n_neu`, `mean_confidence`. **The expensive cache.**
+**`data/processed/sentiment_scores.csv`** — 🔧 225 rows, one per document: `doc_id` (str), `doc_date`, `is_scheduled`, `n_chars`, `S_count`, `S_prob`, `n_sentences`, `n_pos`, `n_neg`, `n_neu`, `n_boilerplate`, `mean_confidence`, `max_tokens`. **The expensive cache.**
+
+⚠️ **Read it with `sentiment.load_sentiment_scores()`, never a bare `pd.read_csv`.** `doc_id` looks like `"20260128"`, so CSV type inference parses it as **int64**, while the parquet sentence cache preserves it as **str**. Merging the two on `doc_id` then matches zero rows and returns an **empty frame with no error** — pandas simply considers `20260128 != "20260128"`. Parquet is self-describing and immune; CSV is used here only because a 225-row table is worth keeping human-readable.
 
 **`data/processed/panel.parquet`** — the analysis table, one row per event. 🔧 As actually built (n = 225):
 
@@ -1499,6 +1603,7 @@ Every entry records what changed and why. Per §0.2, no substantive edit to this
 |---|---|---|
 | 2026-07-23 | — | Initial plan authored (§§0–12 + Appendix A). |
 | 2026-08-04 | *(see `git log`)* | **Phase 0 executed.** Repo scaffolded, environment built and verified, config written and validated, 31 tests passing, GPU confirmed by real kernel launch. |
+| 2026-08-04 | *(see `git log`)* | **Phase 2 executed.** 225 documents / 3,846 sentences scored on GPU in 11.8 s; both caches written; **byte-identical on re-run** (SHA256 verified); 72 tests passing. New: §2.7.1 (**the sign trap is confirmed** — FinBERT's extremes describe economic conditions, never policy stance), §4.1 (boilerplate is 11.1% and tilts negative, era-correlated; the two aggregations correlate at ρ=0.971), §4.2 (non-stationarity measured: mean $S^{prob}$ swings +0.168→+0.039 across regimes), §8.3 (audit part 1 done; part 2 upgraded to a **two-axis** confusion matrix). Q5 resolved (keep *h*=5, reasoning recorded in `config.yaml`); Q6 resolved (fallback parses are clean; the length gap is real history). Caught a silent-failure bug: `doc_id` int64-vs-str across CSV/parquet would have made a Phase 3 merge return empty. |
 | 2026-08-04 | *(see `git log`)* | **Phase 1 executed.** SPY prices (8,434 sessions, NYSE cross-check clean); 393 documents scraped with sha256 provenance; `panel.parquet` built, **n = 225**; 51 tests passing. Corrected §3.1 (disclosure regime, sample start 1994→2000), §3.3.1 (session-open entry rule + release times parsed from documents), §3.5 (measured funnel, n=219 usable), §4.3 (**overlap was understated** — 16 pairs at *h*=20, min gap 3 sessions), §7 Phase 1 → complete, §15 (real schema). Config: `start_date` 2000-01-01, `scrape_start_date`, `sample.include_unscheduled`, `min_text_chars`, `session_open_time_et`. |
 | 2026-08-04 | *(this session)* | **Plan reconciled with reality.** Corrected §3.4 (`Adj Close` cannot yield an adjusted Open → `auto_adjust: true`) and §3.3 (`release_date + 1` is wrong → tz-aware timestamps + `searchsorted`). Updated §3.5 (n ≈ 263, not 240, and added the minimum-detectable-effect framing), §6.1 (actual layout, four deviations), §6.2 (Python 3.12, uv + lockfile, cu128/Blackwell, transformers 5.x), §6.3 (typed config), §7 (Phase 0 marked complete with verification commands; Phase 1 reordered and detailed with the three URL eras), §10 (risk register rebuilt with status column and six new risks), §11 (glossary tripled, grouped), Appendix A (matches `config.yaml`). Added §2.3 FinBERT label-ordering trap and the observed hawkish→positive misread. **New:** §0.1–0.2 (document roles and maintenance protocol), §13 (component reference), §14 (methodology deep-dive incl. power analysis and the Fundamental Law), §15 (data dictionary), §16 (this log). **New file:** `STATUS.md`. |
 
