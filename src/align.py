@@ -241,6 +241,14 @@ def build_panel(cfg: Config, documents: pd.DataFrame | None = None) -> pd.DataFr
         df = df[df["is_scheduled"] == True].copy()  # noqa: E712
     counts["after_unscheduled_filter"] = len(df)
 
+    # Normalise the join key to datetime64 BEFORE anything downstream sees it.
+    # Parquet round-trips a python `date` column as object dtype, while the
+    # sentiment cache (CSV + parse_dates) yields datetime64. Merging the two
+    # then raises "trying to merge on object and datetime64 columns" -- a loud
+    # failure here, but the same class of bug as F16's silent empty merge.
+    # One canonical dtype at the source beats a coercion at every call site.
+    df["doc_date"] = pd.to_datetime(df["doc_date"])
+
     df = df.sort_values("doc_date").reset_index(drop=True)
 
     df["entry_date"] = next_trading_open(df["release_datetime"], sessions, cfg)

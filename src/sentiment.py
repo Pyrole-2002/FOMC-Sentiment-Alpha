@@ -357,6 +357,12 @@ def run_corpus(
     doc_scores = pd.DataFrame(doc_rows)
     sentence_scores = pd.concat(sentence_frames, ignore_index=True)
 
+    # One canonical dtype for the join key across every artifact (see F16 and
+    # the note in align.build_panel). Parquet preserves this; the CSV reader
+    # restores it via `parse_dates` in load_sentiment_scores.
+    doc_scores["doc_date"] = pd.to_datetime(doc_scores["doc_date"])
+    sentence_scores["doc_date"] = pd.to_datetime(sentence_scores["doc_date"])
+
     processed = cfg.paths.resolve("data_processed")
     processed.mkdir(parents=True, exist_ok=True)
     doc_scores.to_csv(processed / "sentiment_scores.csv", index=False)

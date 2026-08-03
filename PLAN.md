@@ -505,6 +505,39 @@ The mean level swings by **more than a full within-era standard deviation** acro
 
 **Design knobs (to be fixed before evaluation, see Section 5):** window length *L* ∈ {6, 12}, and whether *S* is the count or probability version. We pre-register a **primary** configuration and treat the rest as robustness checks.
 
+### 4.2.1 🔧 "±1 standard deviation" is the wrong intuition — measured in Phase 3
+
+The text above says the Z-score "puts the signal on a natural, unit-free scale so a threshold like ±1 standard deviation is meaningful." **That phrasing is misleading, and the data says so.**
+
+| | |
+|---|---|
+| Observed sd of *Z* | **1.79** |
+| Fraction with \|*Z*\| > 1 | **47.9%** |
+| Under a standard normal | 31.7% |
+
+🧠 **Why sd(Z) ≠ 1: a trailing Z-score is *t*-distributed, not normal.** We divide by an *estimated* σ, and at *L* = 6 that estimate carries only **5 degrees of freedom**. Under normality:
+
+$$Z_t = \frac{S_t - \hat\mu_t}{\hat\sigma_t} \sim \sqrt{1+\tfrac{1}{L}}\; \cdot\; t_{L-1}$$
+
+The $\sqrt{1+1/L}$ accounts for $S_t$ being a *fresh* observation outside the estimation window, and $t_{L-1}$ has variance $\frac{\nu}{\nu-2} = \frac{5}{3}$. That gives a theoretical sd of **1.39** — already far from 1.
+
+Observed is **1.79**, higher still, because $S$ itself is fat-tailed and heteroskedastic beyond the normal model.
+
+**Practical consequence:** `θ = 1.0` is *not* "one standard deviation." It puts us in the market 47.9% of the time rather than the ~32% the phrase implies. The threshold is still perfectly reasonable — it is pre-registered and produces a sensible 55 long / 50 short split — but it must be described accurately.
+
+⚠️ **What drives the extremes? Both, but mostly the numerator.** *Z* reaches ±9.9, so it is worth knowing whether that is real surprise or a small-σ artefact:
+
+| Driver | Spearman ρ with \|*Z*\| |
+|---|---|
+| \|numerator\| = \|$S_t - \hat\mu_t$\| | **+0.80** |
+| 1/σ̂ | +0.21 |
+
+The extremes are a **conjunction**: the top-5 all have a numerator at the 83rd–99th percentile *and* a σ̂ at the 1st–26th. So they are genuine surprises **amplified** by landing in unusually calm windows — not manufactured by the denominator, but not independent of it either.
+
+**We do not change *L* in response.** *L* ∈ {6, 12} is already in the pre-registered robustness grid (§5.1), and *L* = 12 doubles the degrees of freedom (theoretical sd falls to 1.14), so the sensitivity is measured rather than assumed. Revising the primary spec after inspecting the data is the move §5.1 exists to prevent — the same reasoning that kept *h* = 5 in the Q5 decision.
+
+💬 *"My Z-score has sd 1.79, not 1. That's not a bug — dividing by a σ estimated from five degrees of freedom gives you a t-distribution, so the theoretical sd is 1.39, and the excess over that is genuine fat tails in the sentiment series. It means my ±1 threshold is really a ±0.56-sigma threshold, and I say so rather than implying otherwise."*
+
 ### 4.3 Step C — Forward returns ($R_{t\to t+h}$)
 
 The realized return of SPY from the entry point over horizon *h* trading days:
@@ -871,8 +904,8 @@ The schema enforces, among others:
 | **0** | Scaffolding, environment, typed config, test harness | ✅ **complete** — 2026-08-04 |
 | **1** | FOMC statements + SPY prices + leak-free alignment → `panel.parquet` | ✅ **complete** — 2026-08-04 |
 | **2** | FinBERT scoring → `sentiment_scores.csv` | ✅ **complete** — 2026-08-04 |
-| **3** | Trailing Z-score signal + positions | ⬜ **next** |
-| **4** | IC, bootstrap CIs, diagnostics, research notebook | ⬜ |
+| **3** | Trailing Z-score signal + positions | ✅ **complete** — 2026-08-04 |
+| **4** | IC, bootstrap CIs, diagnostics, research notebook | ⬜ **next** |
 | **5** | Robustness sweeps, minutes corpus | ⬜ (stretch) |
 
 ---
@@ -1070,7 +1103,45 @@ Five assertions, already written:
 
 ---
 
-### Phase 3 — Alpha signal (Day 5)
+### Phase 3 — Alpha signal (Day 5) ✅ **COMPLETE** — 2026-08-04
+
+**Delivered:** `panel.parquet` augmented with `S`, `mu`, `sigma`, `Z`, `position`, `turnover`. **95 tests passing, ZERO skipped** — every test in the project now actually runs.
+
+**✅ DoD — verified:**
+
+| Criterion | Result |
+|---|---|
+| `Z` reproduced exactly by a naive backward loop | **PASS** — asserted at build time *and* in tests, at *L* ∈ {2, 3, 6, 12} |
+| Perturbing a future *S* leaves every past *Z* unchanged | **PASS** — plus the streaming form (appending data changes nothing) |
+| First *L* = 6 rows have NaN *Z*, position 0 | **PASS** — exactly 6 warm-up rows, 219 usable |
+| \|*Z*\| ≤ θ ⇒ flat; sign follows sign of *Z* | **PASS** — strict inequality, so \|*Z*\| = θ does not trade |
+| σ = 0 yields NaN, never ±∞ | **PASS** — an ∞ would dominate any correlation it touched |
+| Position counts reported | **55 long, 50 short, 120 flat** — in market 46.7% of events |
+| Turnover reconciles with positions | **PASS** — 119 total, 0.529 per event |
+| **No IC computed** | ✅ nothing in Phase 3 touches a return column |
+
+**The signal, characterised (no return data involved):**
+
+| | |
+|---|---|
+| *Z* mean / sd | +0.165 / **1.790** |
+| *Z* range | −7.11 to +9.89 |
+| Largest surprise | 2002-01-30, *Z* = +9.89 |
+| σ̂ range | 0.023 → 0.293 |
+
+**Two findings:**
+
+1. **"±1 standard deviation" is the wrong description of θ = 1.0** (§4.2.1). A trailing Z-score with σ̂ from 5 d.o.f. is *t*-distributed: theoretical sd 1.39, observed 1.79. In-market 47.9%, not the ~32% the phrase implies. *L* = 12 is already in the robustness grid and directly tests this.
+2. **The Z-score is doing its job on the mean.** Raw `S` still drifts by era (+0.164 → +0.039 → +0.133 → +0.055), but `Z_mean` is +0.11 / +0.28 / +0.05 / +0.22 — an order of magnitude closer to zero. The normalisation removes the level drift it was designed to remove.
+
+**Two dtype hazards fixed at the source, not patched at call sites:**
+- `panel.doc_date` was `object`/`date` while the sentiment cache was `datetime64`, so the merge **raised**. Now normalised in both writers, with the dtype pinned by a test.
+- ⚠️ **That fix silently converted three passing tests into *skips*.** `panel["doc_date"] == datetime.date(...)` matched nothing, so the emergency-meeting spot checks stopped running — and **a skip reads as green in the summary line**. A conditional skip that depends on a dtype is an assertion in disguise; those three now assert presence outright. Worth internalising: *skipped tests are not passing tests, and nothing in the default output distinguishes them at a glance.*
+
+---
+
+<details>
+<summary><b>Phase 3 as planned</b></summary>
 
 **Goal:** convert raw sentiment into the tradable Z-score signal and positions.
 
@@ -1084,7 +1155,9 @@ Five assertions, already written:
 🧠 **Concepts reinforced:** surprises-not-levels, stationarity, the `.shift(1)` leak guard, empirical (not assumed) sign.
 
 **✅ DoD:** signal column produced; **both** no-lookahead tests green; the first *L* meetings correctly have `NaN`/`0` signal (undefined window).
-**Deliverable:** `panel.parquet` augmented with `S`, `Z`, `position`. **Commit.**
+**Deliverable:** `panel.parquet` augmented with `S`, `Z`, `position`.
+
+</details>
 
 ---
 
@@ -1585,9 +1658,15 @@ Schemas of every artifact. All dates are timezone-aware `America/New_York` unles
 | `url`, `raw_path`, `source_index`, `anchor_text` | 1 | provenance back to the manifest and the index page |
 | `n_chars`, `selector_used`, `is_error_page`, `is_flagged` | 1 | parse quality; `is_flagged` = too short **or** a soft-404 body |
 | `fwd_ret_1/3/5/10/20` | 1 | open-to-open adjusted returns, *h* in **sessions** |
-| `S_count`, `S_prob` | 3 | raw document sentiment |
-| `mu`, `sigma`, `Z` | 3 | trailing stats and the surprise; NaN for the first *L* |
-| `position` | 3 | −1 / 0 / +1 from the threshold rule |
+| `S_count`, `S_prob` | 3 | raw document sentiment, both aggregations |
+| `S` | 3 | alias for the **pre-registered** aggregation (`S_prob`); the column the signal is built from |
+| `n_sentences`, `n_boilerplate`, `mean_confidence` | 3 | carried through from the sentiment cache for diagnostics |
+| `mu`, `sigma` | 3 | trailing mean and **sample** sd (ddof=1) over the previous *L*, excluding *t* |
+| `Z` | 3 | the surprise. NaN for the first *L* rows **and** wherever σ̂ = 0 (undefined, never ±∞) |
+| `position` | 3 | −1 / 0 / +1 from the threshold rule; NaN *Z* ⇒ flat, never NaN |
+| `turnover` | 3 | \|Δposition\|, first row = \|position₀\|. Drives the Phase 4 cost model |
+
+⚠️ **`doc_date` is `datetime64` in every artifact.** Parquet round-trips a python `date` as `object` dtype while the sentiment CSV yields `datetime64`, and merging the two **raises**. Both writers now normalise, and a test pins it.
 
 **`data/processed/spy_prices_meta.json`** — provenance sidecar for the price download: ticker, `auto_adjust`, yfinance version, UTC download time, row count, first/last session. Necessary because `period="max"` makes the result depend on the date it was fetched.
 
@@ -1603,6 +1682,7 @@ Every entry records what changed and why. Per §0.2, no substantive edit to this
 |---|---|---|
 | 2026-07-23 | — | Initial plan authored (§§0–12 + Appendix A). |
 | 2026-08-04 | *(see `git log`)* | **Phase 0 executed.** Repo scaffolded, environment built and verified, config written and validated, 31 tests passing, GPU confirmed by real kernel launch. |
+| 2026-08-04 | *(see `git log`)* | **Phase 3 executed.** `alpha_signal.py`: trailing Z-score with the mandatory `.shift(1)`, threshold rule, turnover. Leak canary asserted **at build time and in tests**, via an independent backward loop sharing no code with the implementation. **95 tests passing, zero skipped.** New §4.2.1: "±1 standard deviation" is the wrong description of θ=1.0 — a trailing Z with σ̂ from 5 d.o.f. is *t*-distributed (theoretical sd 1.39, observed 1.79, in-market 47.9% vs ~32%); extremes are real surprises (ρ=+0.80 with the numerator) amplified by small σ̂ (ρ=+0.21). *L* unchanged — *L*∈{6,12} is already in the robustness grid. Fixed a `doc_date` dtype mismatch at the source; that fix silently turned 3 passing tests into skips, now asserted outright. |
 | 2026-08-04 | *(see `git log`)* | **Phase 2 executed.** 225 documents / 3,846 sentences scored on GPU in 11.8 s; both caches written; **byte-identical on re-run** (SHA256 verified); 72 tests passing. New: §2.7.1 (**the sign trap is confirmed** — FinBERT's extremes describe economic conditions, never policy stance), §4.1 (boilerplate is 11.1% and tilts negative, era-correlated; the two aggregations correlate at ρ=0.971), §4.2 (non-stationarity measured: mean $S^{prob}$ swings +0.168→+0.039 across regimes), §8.3 (audit part 1 done; part 2 upgraded to a **two-axis** confusion matrix). Q5 resolved (keep *h*=5, reasoning recorded in `config.yaml`); Q6 resolved (fallback parses are clean; the length gap is real history). Caught a silent-failure bug: `doc_id` int64-vs-str across CSV/parquet would have made a Phase 3 merge return empty. |
 | 2026-08-04 | *(see `git log`)* | **Phase 1 executed.** SPY prices (8,434 sessions, NYSE cross-check clean); 393 documents scraped with sha256 provenance; `panel.parquet` built, **n = 225**; 51 tests passing. Corrected §3.1 (disclosure regime, sample start 1994→2000), §3.3.1 (session-open entry rule + release times parsed from documents), §3.5 (measured funnel, n=219 usable), §4.3 (**overlap was understated** — 16 pairs at *h*=20, min gap 3 sessions), §7 Phase 1 → complete, §15 (real schema). Config: `start_date` 2000-01-01, `scrape_start_date`, `sample.include_unscheduled`, `min_text_chars`, `session_open_time_et`. |
 | 2026-08-04 | *(this session)* | **Plan reconciled with reality.** Corrected §3.4 (`Adj Close` cannot yield an adjusted Open → `auto_adjust: true`) and §3.3 (`release_date + 1` is wrong → tz-aware timestamps + `searchsorted`). Updated §3.5 (n ≈ 263, not 240, and added the minimum-detectable-effect framing), §6.1 (actual layout, four deviations), §6.2 (Python 3.12, uv + lockfile, cu128/Blackwell, transformers 5.x), §6.3 (typed config), §7 (Phase 0 marked complete with verification commands; Phase 1 reordered and detailed with the three URL eras), §10 (risk register rebuilt with status column and six new risks), §11 (glossary tripled, grouped), Appendix A (matches `config.yaml`). Added §2.3 FinBERT label-ordering trap and the observed hawkish→positive misread. **New:** §0.1–0.2 (document roles and maintenance protocol), §13 (component reference), §14 (methodology deep-dive incl. power analysis and the Fundamental Law), §15 (data dictionary), §16 (this log). **New file:** `STATUS.md`. |

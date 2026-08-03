@@ -233,11 +233,21 @@ def test_real_entry_is_the_first_qualifying_session(panel, real_sessions, cfg):
     ],
 )
 def test_known_emergency_meetings_align_correctly(panel, doc_date, expected_entry, why):
-    """The cases where naive date arithmetic goes wrong."""
-    row = panel[panel["doc_date"] == doc_date]
-    if row.empty:
-        pytest.skip(f"{doc_date} not in the sample")
-    actual = pd.Timestamp(row["entry_date"].iloc[0]).date()
+    """The cases where naive date arithmetic goes wrong.
+
+    ⚠️ Compare via ``pd.Timestamp``, not a raw ``datetime.date``. When
+    ``panel.doc_date`` was normalised to datetime64, ``== date(...)`` silently
+    matched nothing, so these three checks began SKIPPING rather than failing --
+    and a skip reads as green in the summary line. A conditional skip that
+    depends on a dtype is really an assertion in disguise, so the presence of
+    each date is now asserted outright.
+    """
+    matches = panel[panel["doc_date"] == pd.Timestamp(doc_date)]
+    assert not matches.empty, (
+        f"{doc_date} must be in the sample -- if this date was legitimately "
+        "excluded, update the parametrisation deliberately rather than skipping."
+    )
+    actual = pd.Timestamp(matches["entry_date"].iloc[0]).date()
     assert actual == expected_entry, why
 
 
@@ -259,6 +269,16 @@ def test_real_forward_returns_nan_only_in_the_tail(panel, cfg):
 
 def test_no_duplicate_events(panel):
     assert not panel["doc_date"].duplicated().any()
+
+
+def test_doc_date_is_datetime64(panel):
+    """Pin the join-key dtype across every artifact.
+
+    Parquet round-trips a python ``date`` column as object dtype while the
+    sentiment cache yields datetime64, and merging the two raises. One canonical
+    dtype, asserted, beats a coercion at each call site.
+    """
+    assert pd.api.types.is_datetime64_any_dtype(panel["doc_date"])
 
 
 def test_release_times_are_conservative_by_default(panel, cfg):
